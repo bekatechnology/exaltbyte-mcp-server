@@ -1,5 +1,5 @@
 {
-  "name": "@exaltbyte/mcp-server",
+  "name": "@bekatechnology/mcp-server",
   "version": "0.1.0",
   "description": "ExaltByte MCP Server — deploy apps, databases, and services from Claude Code",
   "bin": {
