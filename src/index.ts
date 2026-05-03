@@ -1108,6 +1108,134 @@ server.tool(
   }
 );
 
+// ── Upload & Deploy (no git required) ──────────────────────────────────────
+
+import { execFile } from "child_process";
+import { promisify } from "util";
+import { readFile, unlink, stat, access } from "fs/promises";
+import { join, basename } from "path";
+import { tmpdir } from "os";
+
+const execAsync = promisify(execFile);
+
+async function createTarball(localPath: string): Promise<string> {
+  const absPath = localPath.replace(/^~/, process.env.HOME ?? "~");
+  await access(absPath);
+
+  const tarPath = join(tmpdir(), `exaltbyte-upload-${Date.now()}.tar.gz`);
+
+  // Use git archive if .git exists (respects .gitignore), otherwise plain tar
+  let usedGit = false;
+  try {
+    await stat(join(absPath, ".git"));
+    await execAsync("git", ["archive", "--format=tar.gz", "-o", tarPath, "HEAD"], { cwd: absPath });
+    usedGit = true;
+  } catch {
+    // No .git — use plain tar, excluding common heavy dirs
+    const excludes = [
+      "--exclude=node_modules",
+      "--exclude=.git",
+      "--exclude=.next",
+      "--exclude=dist",
+      "--exclude=build",
+      "--exclude=__pycache__",
+      "--exclude=.venv",
+      "--exclude=venv",
+      "--exclude=target",
+      "--exclude=.DS_Store",
+    ];
+    await execAsync("tar", ["czf", tarPath, ...excludes, "-C", absPath, "."]);
+  }
+
+  const info = await stat(tarPath);
+  if (info.size > 200 * 1024 * 1024) {
+    await unlink(tarPath).catch(() => {});
+    throw new Error("Tarball exceeds 200 MB limit");
+  }
+
+  return tarPath;
+}
+
+async function uploadMultipart(
+  method: string,
+  path: string,
+  tarPath: string,
+  fields?: Record<string, string>
+) {
+  const url = `${API_BASE}${path}`;
+  const fileData = await readFile(tarPath);
+  const form = new FormData();
+  form.append("file", new Blob([fileData], { type: "application/gzip" }), basename(tarPath));
+  if (fields) {
+    for (const [k, v] of Object.entries(fields)) {
+      form.append(k, v);
+    }
+  }
+  const res = await fetch(url, {
+    method,
+    headers: { Authorization: `Bearer ${API_KEY}` },
+    body: form,
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    let msg: string;
+    try { const e = JSON.parse(text); msg = e.message ?? text; } catch { msg = text; }
+    throw new Error(`${res.status} ${res.statusText}: ${msg}`);
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+server.tool(
+  "upload_deploy",
+  "Deploy an application by uploading a local folder. No GitHub/GitLab setup needed — just point to a directory. The framework, build settings, and port are auto-detected via Nixpacks.",
+  {
+    localPath: z.string().describe("Absolute path to the project folder to deploy"),
+    name: z.string().min(3).describe("App name (lowercase, alphanumeric, hyphens)"),
+    port: z.number().optional().describe("App port (auto-detected if omitted)"),
+    envVars: z.record(z.string(), z.string()).optional().describe("Environment variables"),
+    instanceSize: z.enum(["micro", "small", "medium", "large", "xlarge"]).optional().describe("Instance size (default: micro)"),
+  },
+  async ({ localPath, name, port, envVars, instanceSize }) => {
+    let tarPath: string | null = null;
+    try {
+      tarPath = await createTarball(localPath);
+
+      const fields: Record<string, string> = { name };
+      if (port) fields.port = String(port);
+      if (instanceSize) fields.instanceSize = instanceSize;
+      if (envVars) fields.envVars = JSON.stringify(envVars);
+
+      const app = await uploadMultipart("POST", `/orgs/${ORG_ID}/apps/upload`, tarPath, fields);
+      return ok(`App deployed from local folder!\n\n${fmtApp(app)}\n\nThe app is provisioning. Use get_app_status to check progress.`);
+    } catch (e) {
+      return err(`Failed: ${(e as Error).message}`);
+    } finally {
+      if (tarPath) await unlink(tarPath).catch(() => {});
+    }
+  }
+);
+
+server.tool(
+  "update_app_source",
+  "Re-upload local source code to an existing upload-based app and trigger a redeploy. Use this when the user has made changes and wants to update their deployed app.",
+  {
+    appId: z.string().describe("Application ID to update"),
+    localPath: z.string().describe("Absolute path to the updated project folder"),
+  },
+  async ({ appId, localPath }) => {
+    let tarPath: string | null = null;
+    try {
+      tarPath = await createTarball(localPath);
+      const app = await uploadMultipart("POST", `/orgs/${ORG_ID}/apps/${appId}/upload`, tarPath);
+      return ok(`Source updated and redeploy triggered!\n\n${fmtApp(app)}`);
+    } catch (e) {
+      return err(`Failed: ${(e as Error).message}`);
+    } finally {
+      if (tarPath) await unlink(tarPath).catch(() => {});
+    }
+  }
+);
+
 // ── Start Server ────────────────────────────────────────────────────────────
 
 async function main() {
