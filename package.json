@@ -1,6 +1,6 @@
 {
   "name": "@bekatechnology/mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ExaltByte MCP Server — deploy apps, databases, and services from Claude Code",
   "bin": {
     "exaltbyte-mcp": "./dist/index.js"
