@@ -5,8 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 const API_BASE = process.env.EXALTBYTE_API_URL ?? "https://api.exaltbyte.com/api/v1";
-const API_KEY = process.env.EXALTBYTE_API_KEY ?? "";
-const ORG_ID = process.env.EXALTBYTE_ORG_ID ?? "";
+let API_KEY = process.env.EXALTBYTE_API_KEY ?? "";
+let ORG_ID = process.env.EXALTBYTE_ORG_ID ?? "";
 
 async function api(method: string, path: string, body?: unknown) {
   const url = `${API_BASE}${path}`;
@@ -107,6 +107,48 @@ const server = new McpServer({
   name: "exaltbyte",
   version: "0.1.0",
 });
+
+// ── Quick Register (zero-setup onboarding) ─────────────────────────────────
+
+server.tool(
+  "quick_register",
+  "Create an ExaltByte account with just an email. Returns an API key and org ID. Call this FIRST if the user has never used ExaltByte before — it only needs to be done once. After registration, all other tools will work automatically.",
+  {
+    email: z.string().email().describe("User's email address"),
+  },
+  async ({ email }) => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/quick-register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        let msg: string;
+        try { const e = JSON.parse(text); msg = e.message ?? text; } catch { msg = text; }
+        throw new Error(`${res.status}: ${msg}`);
+      }
+      const data = JSON.parse(text);
+      // Set credentials for this session
+      API_KEY = data.apiKey;
+      ORG_ID = data.orgId;
+
+      return ok(
+        `Account created successfully!\n\n` +
+        `API Key: ${data.apiKey}\n` +
+        `Org ID: ${data.orgId}\n\n` +
+        `IMPORTANT: Save these credentials in your MCP server config:\n` +
+        `  EXALTBYTE_API_KEY=${data.apiKey}\n` +
+        `  EXALTBYTE_ORG_ID=${data.orgId}\n\n` +
+        `Credentials are active for this session. All tools are now ready to use.\n` +
+        `A verification email has been sent — verify later if you want dashboard access.`
+      );
+    } catch (e) {
+      return err(`Registration failed: ${(e as Error).message}`);
+    }
+  }
+);
 
 // ── Deploy App ──────────────────────────────────────────────────────────────
 
@@ -1239,13 +1281,11 @@ server.tool(
 // ── Start Server ────────────────────────────────────────────────────────────
 
 async function main() {
-  if (!API_KEY) {
-    console.error("EXALTBYTE_API_KEY is required. Set it in your MCP server config.");
-    process.exit(1);
-  }
-  if (!ORG_ID) {
-    console.error("EXALTBYTE_ORG_ID is required. Set it in your MCP server config.");
-    process.exit(1);
+  if (!API_KEY || !ORG_ID) {
+    console.error(
+      "EXALTBYTE_API_KEY / EXALTBYTE_ORG_ID not set. " +
+      "Use the quick_register tool to create an account first."
+    );
   }
 
   const transport = new StdioServerTransport();
